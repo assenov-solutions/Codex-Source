@@ -7,9 +7,25 @@ use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::api_server_vision::validate_and_count_image;
 use crate::api_server_wire_validation::validate_tool_call_sequence;
 
 type WireResult<T> = Result<T, ApiError>;
+
+const FILTERED_MODEL_PARAMETERS: &[&str] = &[
+    "frequency_penalty",
+    "logprobs",
+    "max_completion_tokens",
+    "max_output_tokens",
+    "max_tokens",
+    "presence_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "temperature",
+    "top_logprobs",
+    "top_p",
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ParsedRequest {
@@ -94,9 +110,9 @@ pub(crate) fn parse_responses_request(value: Value) -> WireResult<ParsedRequest>
     if dto.store == Some(true) {
         return Err(unsupported("store"));
     }
-    reject_extra(&dto.extra, "")?;
+    reject_extra(&dto.extra, "", FILTERED_MODEL_PARAMETERS)?;
     let reasoning = dto.reasoning.unwrap_or_default();
-    reject_extra(&reasoning.extra, "reasoning.")?;
+    reject_extra(&reasoning.extra, "reasoning.", &[])?;
     let input = dto.input.ok_or_else(|| missing("input"))?;
     let input = parse_responses_input(input)?;
     validate_tool_call_sequence(&input, "input")?;
@@ -142,8 +158,15 @@ fn validate_text(value: &Option<String>, param: &str) -> WireResult<()> {
     Ok(())
 }
 
-fn reject_extra(extra: &Map<String, Value>, prefix: &str) -> WireResult<()> {
-    if let Some((key, _)) = extra.iter().find(|(_, value)| !value.is_null()) {
+fn reject_extra(
+    extra: &Map<String, Value>,
+    prefix: &str,
+    filtered_parameters: &[&str],
+) -> WireResult<()> {
+    if let Some((key, _)) = extra
+        .iter()
+        .find(|(key, value)| !value.is_null() && !filtered_parameters.contains(&key.as_str()))
+    {
         return Err(unsupported(&format!("{prefix}{key}")));
     }
     Ok(())
@@ -189,14 +212,19 @@ fn parse_responses_input(value: Value) -> WireResult<Vec<ResponseItem>> {
     if items.is_empty() {
         return Err(invalid("input", "'input' must not be empty."));
     }
+    let mut image_count = 0;
     items
         .into_iter()
         .enumerate()
-        .map(parse_response_item)
+        .map(|(index, value)| parse_response_item(index, value, &mut image_count))
         .collect()
 }
 
-fn parse_response_item((index, mut value): (usize, Value)) -> WireResult<ResponseItem> {
+fn parse_response_item(
+    index: usize,
+    mut value: Value,
+    image_count: &mut usize,
+) -> WireResult<ResponseItem> {
     let object = value
         .as_object_mut()
         .ok_or_else(|| invalid("input", format!("Input item {index} must be an object.")))?;
@@ -229,14 +257,15 @@ fn parse_response_item((index, mut value): (usize, Value)) -> WireResult<Respons
         let role = object
             .get("role")
             .and_then(Value::as_str)
-            .unwrap_or_default();
-        if !matches!(role, "user" | "assistant" | "system" | "developer") {
+            .unwrap_or_default()
+            .to_string();
+        if !matches!(role.as_str(), "user" | "assistant" | "system" | "developer") {
             return Err(invalid(
                 "input",
                 format!("Unsupported message role '{role}'."),
             ));
         }
-        normalize_message_content(object)?;
+        normalize_message_content(object, &role, image_count)?;
     }
     let item: ResponseItem = serde_json::from_value(value)
         .map_err(|error| invalid("input", format!("Invalid input item {index}: {error}")))?;
@@ -246,7 +275,11 @@ fn parse_response_item((index, mut value): (usize, Value)) -> WireResult<Respons
     Ok(item)
 }
 
-fn normalize_message_content(object: &mut Map<String, Value>) -> WireResult<()> {
+fn normalize_message_content(
+    object: &mut Map<String, Value>,
+    role: &str,
+    image_count: &mut usize,
+) -> WireResult<()> {
     let content = object
         .get_mut("content")
         .ok_or_else(|| missing("input.content"))?;
@@ -267,10 +300,27 @@ fn normalize_message_content(object: &mut Map<String, Value>) -> WireResult<()> 
         let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
         if kind == "text" {
             part.insert("type".to_string(), Value::String("input_text".to_string()));
+        } else if kind == "input_image" {
+            if role != "user" {
+                return Err(invalid(
+                    "input",
+                    "Image content is supported only in user messages.",
+                ));
+            }
+            let image_url = part
+                .get("image_url")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("input", "Image content requires an 'image_url' string."))?;
+            validate_and_count_image(image_url, image_count, "input")?;
+            if let Some((field, _)) = part.iter().find(|(field, value)| {
+                !matches!(field.as_str(), "type" | "image_url" | "detail") && !value.is_null()
+            }) {
+                return Err(unsupported(&format!("input.content.{field}")));
+            }
         } else if !matches!(kind, "input_text" | "output_text") {
             return Err(invalid(
                 "input",
-                format!("Unsupported message content type '{kind}'; only text is supported."),
+                format!("Unsupported message content type '{kind}'."),
             ));
         }
     }

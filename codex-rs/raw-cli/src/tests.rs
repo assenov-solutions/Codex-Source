@@ -19,6 +19,7 @@ use super::runtime::ResolvedRawModel;
 use super::runtime::build_api_request;
 use super::runtime::build_minimal_request;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseItem;
 
 #[test]
@@ -228,6 +229,39 @@ fn responses_lite_embeds_only_client_supplied_tools_and_instructions() {
     assert_eq!(value["input"][1]["role"], "developer");
     assert_eq!(value["input"][1]["content"][0]["text"], "Be concise");
     assert_eq!(value["input"][2]["role"], "user");
+}
+
+#[test]
+fn responses_lite_strips_unsupported_image_detail() {
+    let request = build_api_request(RawApiRequest {
+        model: resolved_model(/*use_responses_lite*/ true),
+        instructions: String::new(),
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputImage {
+                image_url: "https://example.test/page.png".to_string(),
+                detail: Some(ImageDetail::High),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        tools: Vec::new(),
+        tool_choice: "none".to_string(),
+        parallel_tool_calls: false,
+        reasoning_effort: None,
+        service_tier: None,
+    })
+    .expect("build Lite vision request");
+    let value = serde_json::to_value(request).expect("serialize Lite vision request");
+
+    assert_eq!(
+        value["input"][0]["content"][0],
+        serde_json::json!({
+            "type": "input_image",
+            "image_url": "https://example.test/page.png"
+        })
+    );
 }
 
 fn resolved_model(use_responses_lite: bool) -> ResolvedRawModel {

@@ -1,6 +1,7 @@
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::TokenUsage;
@@ -16,6 +17,7 @@ use crate::api_server_chat_wire::parse_chat_request;
 use crate::api_server_response::chat_response;
 use crate::api_server_response::models_response;
 use crate::api_server_response::responses_response;
+use crate::api_server_vision::MAX_IMAGE_INPUTS;
 
 fn message(role: &str, content: ContentItem) -> ResponseItem {
     ResponseItem::Message {
@@ -68,6 +70,30 @@ fn parses_responses_string_without_hidden_context() {
             stream: true,
         }
     );
+}
+
+#[test]
+fn filters_unsupported_responses_model_parameters() {
+    let expected = parse_responses_request(json!({"input": "hello"}))
+        .expect("parse baseline Responses request");
+    let parsed = parse_responses_request(json!({
+        "input": "hello",
+        "frequency_penalty": 0.5,
+        "logprobs": true,
+        "max_completion_tokens": 100,
+        "max_output_tokens": 100,
+        "max_tokens": 100,
+        "presence_penalty": 0.5,
+        "response_format": {"type": "json_object"},
+        "seed": 42,
+        "stop": ["done"],
+        "temperature": 0.0,
+        "top_logprobs": 5,
+        "top_p": 0.9
+    }))
+    .expect("filter unsupported Responses model parameters");
+
+    assert_eq!(parsed, expected);
 }
 
 #[test]
@@ -126,6 +152,109 @@ fn parses_responses_array_and_function_round_trip() {
 }
 
 #[test]
+fn parses_responses_and_chat_vision_inputs() {
+    let responses = parse_responses_request(json!({
+        "model": "gpt-5.6-luna",
+        "input": [{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Extract the text"},
+                {
+                    "type": "input_image",
+                    "image_url": "https://example.test/page-1.png",
+                    "detail": "high"
+                }
+            ]
+        }],
+        "reasoning": {"effort": "low"}
+    }))
+    .expect("parse Responses vision request");
+    let chat = parse_chat_request(json!({
+        "model": "gpt-5.6-luna",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Extract the text"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgo=",
+                        "detail": "original"
+                    }
+                }
+            ]
+        }],
+        "reasoning_effort": "low"
+    }))
+    .expect("parse Chat vision request");
+
+    assert_eq!(
+        responses.input,
+        vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "Extract the text".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "https://example.test/page-1.png".to_string(),
+                    detail: Some(ImageDetail::High),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }]
+    );
+    assert_eq!(
+        chat.request.input,
+        vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "Extract the text".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                    detail: Some(ImageDetail::Original),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }]
+    );
+}
+
+#[test]
+fn accepts_ten_images_and_rejects_the_eleventh() {
+    let images = (0..MAX_IMAGE_INPUTS)
+        .map(|index| {
+            json!({
+                "type": "input_image",
+                "image_url": format!("https://example.test/page-{index}.png")
+            })
+        })
+        .collect::<Vec<_>>();
+    let accepted = parse_responses_request(json!({
+        "input": [{"role": "user", "content": images}]
+    }))
+    .expect("ten images must be accepted");
+    let mut too_many = images;
+    too_many.push(json!({
+        "type": "input_image",
+        "image_url": "https://example.test/page-10.png"
+    }));
+    let error = parse_responses_request(json!({
+        "input": [{"role": "user", "content": too_many}]
+    }))
+    .expect_err("eleven images must be rejected");
+
+    assert_eq!(accepted.input.len(), 1);
+    assert_eq!(error.param.as_deref(), Some("input"));
+}
+
+#[test]
 fn rejects_state_unknown_items_and_internal_metadata() {
     let cases = [
         (json!({"input": "hello", "store": true}), "store"),
@@ -134,8 +263,8 @@ fn rejects_state_unknown_items_and_internal_metadata() {
             "previous_response_id",
         ),
         (
-            json!({"input": "hello", "max_output_tokens": 10}),
-            "max_output_tokens",
+            json!({"input": "hello", "unknown_parameter": true}),
+            "unknown_parameter",
         ),
         (json!({"input": [{"type": "unknown"}]}), "input"),
         (
@@ -149,14 +278,6 @@ fn rejects_state_unknown_items_and_internal_metadata() {
         ),
         (
             json!({"input": [{"type": "message", "role": "tool", "content": "hello"}]}),
-            "input",
-        ),
-        (
-            json!({"input": [{
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_image", "image_url": "https://example.test/a.png"}]
-            }]}),
             "input",
         ),
         (
@@ -279,6 +400,32 @@ fn parses_chat_history_tools_and_usage_option() {
 }
 
 #[test]
+fn filters_unsupported_chat_model_parameters() {
+    let expected = parse_chat_request(json!({
+        "messages": [{"role": "user", "content": "hello"}]
+    }))
+    .expect("parse baseline Chat request");
+    let parsed = parse_chat_request(json!({
+        "messages": [{"role": "user", "content": "hello"}],
+        "frequency_penalty": 0.5,
+        "logprobs": true,
+        "max_completion_tokens": 100,
+        "max_output_tokens": 100,
+        "max_tokens": 100,
+        "presence_penalty": 0.5,
+        "response_format": {"type": "json_object"},
+        "seed": 42,
+        "stop": ["done"],
+        "temperature": 0.0,
+        "top_logprobs": 5,
+        "top_p": 0.9
+    }))
+    .expect("filter unsupported Chat model parameters");
+
+    assert_eq!(parsed, expected);
+}
+
+#[test]
 fn rejects_unmatched_chat_tool_output() {
     let error = parse_chat_request(json!({
         "messages": [
@@ -292,22 +439,20 @@ fn rejects_unmatched_chat_tool_output() {
 }
 
 #[test]
-fn rejects_chat_multiple_choices_and_unsupported_content() {
+fn rejects_chat_multiple_choices_and_unknown_parameters() {
     let multiple = parse_chat_request(json!({
         "messages": [{"role": "user", "content": "hello"}],
         "n": 2
     }))
     .expect_err("multiple choices are unsupported");
-    let image = parse_chat_request(json!({
-        "messages": [{
-            "role": "user",
-            "content": [{"type": "image_url", "image_url": {"url": "https://example.test"}}]
-        }]
+    let unknown = parse_chat_request(json!({
+        "messages": [{"role": "user", "content": "hello"}],
+        "unknown_parameter": true
     }))
-    .expect_err("image content is unsupported");
+    .expect_err("unknown parameter is unsupported");
 
     assert_eq!(multiple.param.as_deref(), Some("n"));
-    assert_eq!(image.param.as_deref(), Some("messages"));
+    assert_eq!(unknown.param.as_deref(), Some("unknown_parameter"));
 }
 
 #[test]

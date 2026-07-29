@@ -3,11 +3,13 @@ use std::net::SocketAddr;
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::http::header::AUTHORIZATION;
+use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 
 use super::ListenScope;
 use super::authorization_is_valid;
 use super::error_response;
+use super::model_alias_selection;
 use super::requires_api_authorization;
 use super::unauthorized_response;
 use super::upstream_status;
@@ -211,5 +213,35 @@ fn api_errors_use_the_openai_envelope() {
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
         Some("application/json")
+    );
+}
+
+#[test]
+fn parses_model_reasoning_effort_aliases() {
+    assert_eq!(
+        model_alias_selection(Some("gpt-5.6-sol (High)"), None),
+        (Some("gpt-5.6-sol".to_string()), Some(ReasoningEffort::High))
+    );
+    assert_eq!(
+        model_alias_selection(Some("gpt-5.6-sol(xhigh)"), None),
+        (
+            Some("gpt-5.6-sol".to_string()),
+            Some(ReasoningEffort::XHigh)
+        )
+    );
+}
+
+#[test]
+fn explicit_reasoning_effort_overrides_model_alias() {
+    assert_eq!(
+        model_alias_selection(Some("gpt-5.6-terra (Ultra)"), Some(ReasoningEffort::Low)),
+        (
+            Some("gpt-5.6-terra".to_string()),
+            Some(ReasoningEffort::Low)
+        )
+    );
+    assert_eq!(
+        model_alias_selection(Some("gpt-5.6-terra (Unknown)"), None),
+        (Some("gpt-5.6-terra (Unknown)".to_string()), None)
     );
 }

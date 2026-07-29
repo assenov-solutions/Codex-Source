@@ -190,6 +190,7 @@ state directories are separate.
 - OpenAI-compatible local Responses and Chat Completions routes.
 - Typed Responses SSE and Chat Completions SSE streaming.
 - Model discovery through `/v1/models`.
+- Image inputs on user messages through HTTPS or supported base64 data URLs.
 - Caller-defined function schemas, calls, and matching outputs.
 - Subscription-backed image generation through `gpt-image-2`.
 - Strict validation instead of silently ignoring unsupported request fields.
@@ -203,7 +204,6 @@ Codex Raw deliberately does not provide:
 - `AGENTS.md`, skills, plugin, app, or workspace loading;
 - automatic execution of caller-defined functions;
 - stateful text responses or thread resume;
-- multimodal input on the text routes;
 - a public, multi-tenant, or per-user authorization service.
 
 ## Authentication and isolated state
@@ -282,10 +282,11 @@ codex-raw api-server --listen 127.0.0.1:8080 --max-concurrency 16
 | `POST` | `/v1/chat/completions`   | Chat Completions JSON or SSE |
 | `POST` | `/v1/images/generations` | Base64 image generation      |
 
-The compatibility surface is intentionally partial. Unsupported non-null
-fields are rejected, function tools remain caller-owned, and text requests are
-stateless. Consult `codex-raw api-server --help` and [API.md](API.md) for the
-exact behavior of the installed version.
+The compatibility surface is intentionally partial. User messages can contain
+validated image inputs, common unsupported model-generation controls are
+accepted as compatibility no-ops, function tools remain caller-owned, and text
+requests are stateless. Consult `codex-raw api-server --help` and
+[API.md](API.md) for the exact behavior of the installed version.
 
 ## Security essentials
 

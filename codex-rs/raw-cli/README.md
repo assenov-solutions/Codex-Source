@@ -249,8 +249,9 @@ without a completion event or token usage is treated as an error.
 For standard Responses transport, those fields map directly to the upstream
 request. For Responses Lite, function definitions and caller instructions are
 inserted as explicit developer input items because the Lite transport does not
-use the standard top-level fields. If tools are present, encrypted reasoning is
-included so a stateless client can replay the full output in the next request.
+use the standard top-level fields, and unsupported image detail settings are
+removed. If tools are present, encrypted reasoning is included so a stateless
+client can replay the full output in the next request.
 
 Raw never adds its own instructions or tools to this request.
 
@@ -299,7 +300,7 @@ interfaces, while `--listen [::]:8080` binds IPv6 interfaces and may also accept
 IPv4 depending on the OS. Raw refuses either non-loopback bind unless
 `--api-token` or `CODEX_RAW_API_TOKEN` is configured. Remote clients must replace
 the wildcard address with the machine's real LAN IP or DNS name. The request
-body limit is 2 MiB. A non-blocking semaphore returns HTTP 429 when all inference
+body limit is 32 MiB. A non-blocking semaphore returns HTTP 429 when all inference
 slots are occupied.
 
 When a token is configured, `Authorization: Bearer TOKEN` is required for
@@ -318,13 +319,15 @@ connection/header timeouts, and connection limits. Firewall the Raw port so
 only that proxy or other explicitly trusted clients can reach it.
 
 All POST routes use strict parsers. Unsupported non-null fields return an
-OpenAI-shaped error. This prevents a client from assuming that a requested
-behavior was honored when it was actually ignored.
+OpenAI-shaped error, except for the documented model-generation compatibility
+controls that are explicitly accepted as no-ops.
 
-`GET /v1/models` returns the current text model catalog plus the dedicated
-`gpt-image-2` image model. Listing a model does not make it valid on every
-endpoint: use `gpt-image-2` through `/v1/images/generations`, not as a text
-model.
+`GET /v1/models` returns the current text model catalog, aliases for advertised
+reasoning efforts such as `gpt-model (High)`, and the dedicated `gpt-image-2`
+image model. Supplying an effort alias selects the base model and effort; an
+explicit effort field takes precedence. Listing a model does not make it valid
+on every endpoint: use `gpt-image-2` through `/v1/images/generations`, not as a
+text model.
 
 ### Supported request settings
 
@@ -334,8 +337,8 @@ accepted upstream.
 
 | Endpoint                 | Supported fields and behavior                                                                                                                                                                                                                                                                                                                                           |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/v1/responses`          | `model`; required `input` string or supported text/reasoning/function-call item array; `instructions`; function `tools`; `tool_choice` = `none`, `auto`, or `required`; `parallel_tool_calls` (default `true`); `reasoning.effort`; non-empty `service_tier`; `stream` (default `false`); `store` omitted, `null`, or `false`                                           |
-| `/v1/chat/completions`   | `model`; non-empty text/function-tool-loop `messages`; function `tools`; `tool_choice` = `none`, `auto`, or `required`; `parallel_tool_calls` (default `true`); `reasoning_effort`; non-empty `service_tier`; `stream` (default `false`); `stream_options.include_usage` (default `false`); `n` omitted or `1`; `store` omitted, `null`, or `false`                     |
+| `/v1/responses`          | `model`; required `input` string or supported text/user-image/reasoning/function-call item array; `instructions`; function `tools`; `tool_choice` = `none`, `auto`, or `required`; `parallel_tool_calls` (default `true`); `reasoning.effort`; non-empty `service_tier`; `stream` (default `false`); `store` omitted, `null`, or `false`                                        |
+| `/v1/chat/completions`   | `model`; non-empty text/user-image/function-tool-loop `messages`; function `tools`; `tool_choice` = `none`, `auto`, or `required`; `parallel_tool_calls` (default `true`); `reasoning_effort`; non-empty `service_tier`; `stream` (default `false`); `stream_options.include_usage` (default `false`); `n` omitted or `1`; `store` omitted, `null`, or `false`                  |
 | `/v1/images/generations` | required non-empty `prompt`; `model` (default `gpt-image-2`); `n` from 1 to 4; `quality` = `auto` (default), `low`, `medium`, or `high`; non-empty model-supported `size` such as `auto` (default), `1024x1024`, `1536x1024`, or `1024x1536`; `background` = `auto` (default), `opaque`, or `transparent` on supporting models; `response_format` omitted or `b64_json` |
 
 Known reasoning effort spellings are `none`, `minimal`, `low`, `medium`,
@@ -356,11 +359,20 @@ Chat Completions cannot faithfully replay opaque encrypted reasoning items.
 For Responses Lite models, Raw accepts `parallel_tool_calls` but sends it as
 false because that transport packs caller tools into developer input items.
 
-Unsupported non-null fields are rejected. This includes
-`model_verbosity`/`text.verbosity`, `temperature`, `top_p`, output-token limits,
-`reasoning.summary`, structured-output formats, `background` text jobs,
-stateful `store: true`, `previous_response_id`, named/object `tool_choice`,
-built-in web/shell/MCP tools, and multimodal input on the text routes.
+User messages may include at most 10 validated image inputs. Responses accepts
+`input_image` content and Chat Completions accepts `image_url` content. Each
+URL must use HTTPS or a base64 PNG, JPEG, WEBP, or GIF data URL; remote URLs
+are capped at 8 KiB and data URLs at 3 MiB. Responses Lite omits image
+`detail`, which that transport does not support.
+
+For SDK compatibility, the text routes accept and discard these controls:
+`frequency_penalty`, `logprobs`, `max_completion_tokens`,
+`max_output_tokens`, `max_tokens`, `presence_penalty`, `response_format`,
+`seed`, `stop`, `temperature`, `top_logprobs`, and `top_p`. Other unsupported
+non-null fields are rejected, including `model_verbosity`/`text.verbosity`,
+`reasoning.summary`, `background` text jobs, stateful `store: true`,
+`previous_response_id`, named/object `tool_choice`, and built-in
+web/shell/MCP tools.
 
 Although the public HTTP response can be non-streaming, the ChatGPT backend
 transport itself uses a stream and Raw collects it when `stream` is false.

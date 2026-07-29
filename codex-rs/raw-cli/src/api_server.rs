@@ -29,6 +29,8 @@ use axum::routing::post;
 use codex_api::ApiError as CodexApiError;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::TokenUsage;
 use constant_time_eq::constant_time_eq;
 use serde_json::Value;
@@ -55,7 +57,7 @@ use crate::runtime::RawRuntime;
 use crate::runtime::RawStreamEvent;
 use crate::runtime::ResolvedRawModel;
 
-const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CONCURRENCY: usize = 256;
 const MIN_API_TOKEN_BYTES: usize = 32;
 const MAX_API_TOKEN_BYTES: usize = 512;
@@ -219,13 +221,8 @@ fn unauthorized_response() -> Response {
 }
 
 async fn list_models(State(state): State<ApiState>) -> Response {
-    let mut model_ids = state
-        .runtime
-        .list_models()
-        .await
-        .into_iter()
-        .map(|model| model.model)
-        .collect::<Vec<_>>();
+    let models = state.runtime.list_models().await;
+    let mut model_ids = model_ids_with_effort_aliases(&models);
     if !model_ids.iter().any(|model| model == DEFAULT_IMAGE_MODEL) {
         model_ids.push(DEFAULT_IMAGE_MODEL.to_string());
     }
@@ -270,7 +267,7 @@ async fn create_response(
         Ok(Json(payload)) => payload,
         Err(error) => return json_rejection_response(error),
     };
-    let request = match parse_responses_request(payload) {
+    let mut request = match parse_responses_request(payload) {
         Ok(request) => request,
         Err(error) => return wire_error_response(error),
     };
@@ -278,7 +275,10 @@ async fn create_response(
         Ok(permit) => permit,
         Err(response) => return response,
     };
-    let model = resolve_model(&state, request.model.as_deref()).await;
+    let (requested_model, reasoning_effort) =
+        model_alias_selection(request.model.as_deref(), request.reasoning_effort.take());
+    request.reasoning_effort = reasoning_effort;
+    let model = resolve_model(&state, requested_model.as_deref()).await;
     let response_id = state.allocate_id("resp");
     let created = unix_seconds();
     let stream = match state
@@ -320,7 +320,7 @@ async fn create_chat_completion(
         Ok(Json(payload)) => payload,
         Err(error) => return json_rejection_response(error),
     };
-    let request = match parse_chat_request(payload) {
+    let mut request = match parse_chat_request(payload) {
         Ok(request) => request,
         Err(error) => return wire_error_response(error),
     };
@@ -328,7 +328,12 @@ async fn create_chat_completion(
         Ok(permit) => permit,
         Err(response) => return response,
     };
-    let model = resolve_model(&state, request.request.model.as_deref()).await;
+    let (requested_model, reasoning_effort) = model_alias_selection(
+        request.request.model.as_deref(),
+        request.request.reasoning_effort.take(),
+    );
+    request.request.reasoning_effort = reasoning_effort;
+    let model = resolve_model(&state, requested_model.as_deref()).await;
     let response_id = state.allocate_id("chatcmpl");
     let created = unix_seconds();
     let stream = match state
@@ -413,6 +418,86 @@ async fn resolve_model(state: &ApiState, requested: Option<&str>) -> ResolvedRaw
         state.default_model.clone()
     } else {
         state.runtime.resolve_model(requested).await
+    }
+}
+
+fn model_alias_selection(
+    requested: Option<&str>,
+    explicit_effort: Option<ReasoningEffort>,
+) -> (Option<String>, Option<ReasoningEffort>) {
+    let Some(requested) = requested else {
+        return (None, explicit_effort);
+    };
+    let Some(without_closing_parenthesis) = requested.strip_suffix(')') else {
+        return (Some(requested.to_string()), explicit_effort);
+    };
+    let Some((model, effort)) = without_closing_parenthesis.rsplit_once('(') else {
+        return (Some(requested.to_string()), explicit_effort);
+    };
+    let Some(alias_effort) = parse_reasoning_effort_alias(effort.trim()) else {
+        return (Some(requested.to_string()), explicit_effort);
+    };
+    let model = model.trim_end();
+    if model.is_empty() {
+        return (Some(requested.to_string()), explicit_effort);
+    }
+
+    (
+        Some(model.to_string()),
+        explicit_effort.or(Some(alias_effort)),
+    )
+}
+
+fn parse_reasoning_effort_alias(effort: &str) -> Option<ReasoningEffort> {
+    if effort.eq_ignore_ascii_case("none") {
+        Some(ReasoningEffort::None)
+    } else if effort.eq_ignore_ascii_case("minimal") {
+        Some(ReasoningEffort::Minimal)
+    } else if effort.eq_ignore_ascii_case("low") {
+        Some(ReasoningEffort::Low)
+    } else if effort.eq_ignore_ascii_case("medium") {
+        Some(ReasoningEffort::Medium)
+    } else if effort.eq_ignore_ascii_case("high") {
+        Some(ReasoningEffort::High)
+    } else if effort.eq_ignore_ascii_case("xhigh") {
+        Some(ReasoningEffort::XHigh)
+    } else if effort.eq_ignore_ascii_case("max") {
+        Some(ReasoningEffort::Max)
+    } else if effort.eq_ignore_ascii_case("ultra") {
+        Some(ReasoningEffort::Ultra)
+    } else {
+        None
+    }
+}
+
+fn model_ids_with_effort_aliases(models: &[ModelPreset]) -> Vec<String> {
+    models
+        .iter()
+        .flat_map(|model| {
+            std::iter::once(model.model.clone()).chain(
+                model.supported_reasoning_efforts.iter().map(|preset| {
+                    format!(
+                        "{} ({})",
+                        model.model,
+                        reasoning_effort_alias_label(&preset.effort)
+                    )
+                }),
+            )
+        })
+        .collect()
+}
+
+fn reasoning_effort_alias_label(effort: &ReasoningEffort) -> String {
+    match effort {
+        ReasoningEffort::None => "None".to_string(),
+        ReasoningEffort::Minimal => "Minimal".to_string(),
+        ReasoningEffort::Low => "Low".to_string(),
+        ReasoningEffort::Medium => "Medium".to_string(),
+        ReasoningEffort::High => "High".to_string(),
+        ReasoningEffort::XHigh => "XHigh".to_string(),
+        ReasoningEffort::Max => "Max".to_string(),
+        ReasoningEffort::Ultra => "Ultra".to_string(),
+        ReasoningEffort::Custom(effort) => effort.clone(),
     }
 }
 

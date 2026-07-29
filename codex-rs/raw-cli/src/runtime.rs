@@ -325,6 +325,17 @@ impl RawResponseStream {
 
 pub(crate) fn build_api_request(mut request: RawApiRequest) -> Result<ResponsesApiRequest> {
     let use_responses_lite = request.model.use_responses_lite;
+    if use_responses_lite {
+        for item in &mut request.input {
+            if let ResponseItem::Message { content, .. } = item {
+                for content_item in content {
+                    if let ContentItem::InputImage { detail, .. } = content_item {
+                        *detail = None;
+                    }
+                }
+            }
+        }
+    }
     let has_tools = !request.tools.is_empty();
     let tools = if use_responses_lite {
         if has_tools {

@@ -36,6 +36,7 @@ mod api_server_http_stream;
 mod api_server_image_wire;
 mod api_server_response;
 mod api_server_stream;
+mod api_server_vision;
 mod api_server_wire;
 mod api_server_wire_validation;
 mod app_server;

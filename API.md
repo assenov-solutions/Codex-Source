@@ -83,9 +83,9 @@ The process runs in the foreground and stops on `Ctrl+C`.
 `/readyz` returns HTTP 503 when the isolated Raw login is unavailable. Listing
 an image-model ID does not guarantee that the account can use it on every
 endpoint. Inference requests return HTTP 429 rather than queueing when all
-configured concurrency slots are occupied. Request bodies are limited to
-2 MiB, and inference POST requests carrying any browser `Origin` header are
-rejected with HTTP 403.
+configured concurrency slots are occupied. Request bodies are limited to 32 MiB
+so they can carry validated base64 image inputs. Inference POST requests
+carrying any browser `Origin` header are rejected with HTTP 403.
 
 ### Quick requests
 
@@ -197,18 +197,24 @@ loopback too when local processes are not mutually trusted.
 
 ## Request compatibility
 
-The HTTP surface is deliberately smaller and stricter than the complete OpenAI
-API. Unsupported non-null fields are rejected instead of silently ignored.
+The HTTP surface is deliberately smaller than the complete OpenAI API.
+Unsupported non-null fields are normally rejected. A documented set of common
+model-generation controls is accepted and discarded as a compatibility no-op.
 Model/account capabilities still determine whether a forwarded option is
 accepted upstream.
+
+`GET /v1/models` includes aliases such as `gpt-model (High)` for each model's
+advertised reasoning efforts. Supplying one of those aliases selects the base
+model and effort. An explicit `reasoning.effort` or `reasoning_effort` takes
+precedence over the alias.
 
 ### Responses
 
 `POST /v1/responses` supports:
 
 - `model`;
-- `input` as a string or supported text, reasoning, function-call, and
-  function-call-output items;
+- `input` as a string or supported text, user-image, reasoning, function-call,
+  and function-call-output items;
 - caller-owned `instructions`;
 - function `tools`;
 - `tool_choice` values `none`, `auto`, or `required`;
@@ -227,7 +233,7 @@ force its upstream value to `false`.
 `POST /v1/chat/completions` supports:
 
 - `model`;
-- text and function-tool-loop messages;
+- text, user `image_url`, and function-tool-loop messages;
 - function `tools`;
 - `tool_choice` values `none`, `auto`, or `required`;
 - `parallel_tool_calls`;
@@ -241,6 +247,19 @@ force its upstream value to `false`.
 Chat streams finish with `[DONE]`. Use Responses for reasoning-model function
 loops because Chat messages cannot faithfully replay opaque encrypted
 reasoning items.
+
+Image inputs are accepted only in user messages. Responses uses
+`{"type":"input_image","image_url":"..."}`; Chat Completions uses
+`{"type":"image_url","image_url":{"url":"..."}}`. URLs must be HTTPS or base64
+PNG, JPEG, WEBP, or GIF data URLs. A request may contain at most 10 images;
+remote URLs are capped at 8 KiB and data URLs at 3 MiB each. Responses Lite
+forwards images but omits the unsupported `detail` setting.
+
+For SDK compatibility, the text routes accept and discard these model
+generation controls: `frequency_penalty`, `logprobs`,
+`max_completion_tokens`, `max_output_tokens`, `max_tokens`,
+`presence_penalty`, `response_format`, `seed`, `stop`, `temperature`,
+`top_logprobs`, and `top_p`. They do not change the upstream request.
 
 ### Image generation
 
@@ -268,10 +287,8 @@ The current text routes reject or do not implement:
 
 - stateful `store: true` and `previous_response_id`;
 - built-in web, shell, file, MCP, or agent tools;
-- multimodal text-route input;
-- structured output;
+- structured-output enforcement;
 - background text jobs;
-- output-token limits, `temperature`, and `top_p`;
 - automatic execution of caller-defined functions.
 
 Consult `codex-raw api-server --help` for the exact fields accepted by the
